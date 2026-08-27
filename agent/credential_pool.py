@@ -2901,6 +2901,77 @@ def _env_key_var_candidates(env_vars: list[str], entries: list[PooledCredential]
     return names
 
 
+
+def resolve_env_key_binding(
+    provider: str, requested_provider: Optional[str] = None
+) -> Optional[dict[str, Any]]:
+    """Resolve a provider's env-sourced API-key binding, or ``None``.
+
+    Single source of truth for "which env var(s) hold this provider's key and
+    what is its default endpoint", so every consumer covers the same set by
+    construction instead of by adding a provider branch.
+
+    Returns a dict with:
+        key_env_vars      ordered candidate env var names, first non-empty wins
+        base_url_env_var  env var name for a base-URL override ("" if none)
+        default_base_url  the provider's default endpoint ("" if unknown)
+
+    or ``None`` when the credential is NOT env-sourced — OAuth singletons
+    (nous, openai-codex, xai-oauth, qwen-oauth, minimax-oauth), inline
+    ``api_key`` config, or pool-only entries. Nothing in ``~/.hermes/.env``
+    to watch for those.
+    """
+    provider = (provider or "").strip().lower()
+
+    # OpenRouter is an aggregator with no PROVIDER_REGISTRY entry (the
+    # registry branch below would miss it) — its OPENROUTER_API_KEY is
+    # env-sourced exactly like a registry api-key provider.
+    if provider == "openrouter":
+        return {
+            "key_env_vars": ("OPENROUTER_API_KEY",),
+            "base_url_env_var": "",
+            "default_base_url": OPENROUTER_BASE_URL,
+        }
+
+    pconfig = PROVIDER_REGISTRY.get(provider)
+    if pconfig and getattr(pconfig, "auth_type", "") == AUTH_TYPE_API_KEY and getattr(
+        pconfig, "api_key_env_vars", ()
+    ):
+        env_vars = list(pconfig.api_key_env_vars)
+        if provider == "anthropic":
+            env_vars = [
+                "ANTHROPIC_TOKEN",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "ANTHROPIC_API_KEY",
+            ]
+        return {
+            "key_env_vars": tuple(env_vars),
+            "base_url_env_var": getattr(pconfig, "base_url_env_var", "") or "",
+            "default_base_url": getattr(pconfig, "inference_base_url", "") or "",
+        }
+
+    # Named custom provider (config ``providers.<name>`` / ``custom_providers``)
+    # whose credential is env-sourced via ``key_env``. Looked up lazily to
+    # avoid a credential_pool → runtime_provider import cycle.
+    if provider == "custom":
+        try:
+            from hermes_cli.runtime_provider import _get_named_custom_provider
+
+            custom_provider = _get_named_custom_provider(requested_provider or "")
+        except Exception:
+            custom_provider = None
+        if custom_provider:
+            key_env = str(custom_provider.get("key_env") or "").strip()
+            base_url = str(custom_provider.get("base_url") or "").strip().rstrip("/")
+            if key_env:
+                return {
+                    "key_env_vars": (key_env,),
+                    "base_url_env_var": "",
+                    "default_base_url": base_url,
+                }
+
+    return None
+
 def _seed_from_env(provider: str, entries: list[PooledCredential]) -> tuple[bool, set[str]]:
     seed = _Seeder(provider, entries)
     # Copilot's singleton branch exchanges the raw ghu_ OAuth token for the
